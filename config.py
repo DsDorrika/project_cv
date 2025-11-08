@@ -90,10 +90,16 @@ def validate_config():
     if SOUND_ENABLED and not os.path.exists(SOUND_FILE):
         warnings.append(f"Звуковой файл не найден: {SOUND_FILE}. Будет использована заглушка.")
     
-    # Проверка директорий
-    for directory in [MODELS_DIR, SOUNDS_DIR, VIOLATIONS_DIR]:
-        if not directory.exists():
-            directory.mkdir(parents=True, exist_ok=True)
+    # Проверка и создание директорий
+    directories_to_check = [
+        str(MODELS_DIR),
+        str(SOUNDS_DIR), 
+        str(VIOLATIONS_DIR)
+    ]
+    
+    for directory in directories_to_check:
+        if not os.path.exists(directory):
+            os.makedirs(directory, exist_ok=True)
             warnings.append(f"Создана директория: {directory}")
     
     # Проверка координат линии

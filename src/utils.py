@@ -9,7 +9,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 def calculate_distance(pt1: Tuple[float, float], pt2: Tuple[float, float]) -> float:
-
+    
     try:
         return np.sqrt((pt1[0] - pt2[0])**2 + (pt1[1] - pt2[1])**2)
     except (TypeError, IndexError) as e:
@@ -17,7 +17,7 @@ def calculate_distance(pt1: Tuple[float, float], pt2: Tuple[float, float]) -> fl
         return float('inf')
 
 def get_timestamp_filename(prefix: str = "violation") -> str:
-
+    
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]  # Миллисекунды
     return f"{prefix}_{timestamp}"
 
@@ -45,7 +45,7 @@ def calculate_iou(box1: List[float], box2: List[float]) -> float:
     return intersection / union if union > 0 else 0
 
 def resize_frame(frame: np.ndarray, max_width: int = 800, max_height: int = 600) -> np.ndarray:
-
+    
     if frame is None:
         return frame
         
@@ -83,7 +83,7 @@ def draw_text_with_background(img: np.ndarray, text: str, position: Tuple[int, i
     cv2.putText(img, text, (x, y), font, font_scale, text_color, thickness)
 
 def save_data_to_json(data: Dict[str, Any], filename: str) -> bool:
-
+    
     try:
         with open(filename, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=2, ensure_ascii=False, default=str)
@@ -94,7 +94,7 @@ def save_data_to_json(data: Dict[str, Any], filename: str) -> bool:
         return False
 
 def load_data_from_json(filename: str) -> Optional[Dict[str, Any]]:
-
+    
     try:
         with open(filename, 'r', encoding='utf-8') as f:
             return json.load(f)
@@ -102,7 +102,9 @@ def load_data_from_json(filename: str) -> Optional[Dict[str, Any]]:
         logger.error(f"Ошибка загрузки данных из {filename}: {e}")
         return None
 
-class FPSCouter:
+class FPSCounter:
+    """Счетчик FPS"""
+    
     def __init__(self, buffer_size: int = 30):
         self.buffer_size = buffer_size
         self.times: List[float] = []
@@ -143,3 +145,10 @@ if __name__ == "__main__":
     box1 = [10, 10, 50, 50]
     box2 = [20, 20, 60, 60]
     print(f"IoU: {calculate_iou(box1, box2):.2f}")
+    
+    # Тест FPSCounter
+    counter = FPSCounter()
+    for i in range(5):
+        time.sleep(0.1)
+        fps = counter.update()
+        print(f"FPS: {fps:.2f}")

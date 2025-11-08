@@ -8,7 +8,6 @@ logger = logging.getLogger(__name__)
 
 class SoundPlayer:
     def __init__(self, sound_file: Optional[str] = None):
-    
         self.sound_file = sound_file or config.SOUND_FILE
         self.is_available = False
         self._play_thread: Optional[threading.Thread] = None
@@ -91,8 +90,7 @@ class SoundPlayer:
                     self._sound_object.play()
                     
                     # Ожидание завершения воспроизведения или сигнала остановки
-                    while (self._sound_object.get_num_channels() > 0 and 
-                           not self._stop_flag.is_set()):
+                    while self._pygame.mixer.get_busy() and not self._stop_flag.is_set():
                         import time
                         time.sleep(0.1)
                 else:
@@ -136,9 +134,9 @@ class SoundPlayer:
         self._stop_flag.set()
         
         # Остановка воспроизведения в pygame
-        if self._pygame_initialized and self._sound_object is not None:
+        if self._pygame_initialized:
             try:
-                self._sound_object.stop()
+                self._pygame.mixer.stop()
             except Exception as e:
                 logger.error(f"Ошибка остановки воспроизведения: {e}")
 
@@ -171,13 +169,24 @@ class SoundPlayer:
 
     def get_status(self) -> dict:
         """Получение статуса звуковой системы"""
+        is_playing = False
+        if self._play_thread:
+            is_playing = self._play_thread.is_alive()
+            
+        volume = 0
+        if self._sound_object:
+            try:
+                volume = self._sound_object.get_volume()
+            except:
+                pass
+        
         return {
             'available': self.is_available,
             'sound_file': self.sound_file,
             'file_exists': os.path.exists(self.sound_file),
             'pygame_initialized': self._pygame_initialized,
-            'volume': self._sound_object.get_volume() if self._sound_object else 0,
-            'is_playing': (self._play_thread.is_alive() if self._play_thread else False)
+            'volume': volume,
+            'is_playing': is_playing
         }
 
     def set_sound_file(self, sound_file: str):
@@ -214,60 +223,8 @@ def get_sound_player() -> SoundPlayer:
     return _sound_player_instance
 
 
-# Функция для создания тестового звукового файла
-def create_test_sound_file(output_path: str = None):
-    """
-    Создание простого тестового WAV файла с помощью pygame
-    """
-    if output_path is None:
-        output_path = config.SOUND_FILE
-    
-    try:
-        import pygame
-        import numpy as np
-        
-        # Параметры звука
-        sample_rate = 22050
-        duration = 0.5  # секунды
-        frequency = 880  # Hz (нота A5)
-        
-        # Генерация синусоидальной волны
-        t = np.linspace(0, duration, int(sample_rate * duration), False)
-        wave = 0.5 * np.sin(2 * np.pi * frequency * t)
-        
-        # Нормализация до 16-битного звука
-        wave = np.int16(wave * 32767)
-        
-        # Создание стерео звука
-        stereo_wave = np.column_stack((wave, wave))
-        
-        # Сохранение с помощью pygame
-        pygame.mixer.init(sample_rate, size=-16, channels=2, buffer=512)
-        sound = pygame.sndarray.make_sound(stereo_wave)
-        pygame.mixer.Sound.play(sound)
-        
-        # Ожидание завершения воспроизведения
-        import time
-        time.sleep(duration + 0.1)
-        
-        logger.info(f"Тестовый звуковой файл создан: {output_path}")
-        return True
-        
-    except ImportError:
-        logger.error("Pygame не установлен, невозможно создать тестовый звук")
-        return False
-    except Exception as e:
-        logger.error(f"Ошибка создания тестового звука: {e}")
-        return False
-
-
 # Тестирование
 if __name__ == "__main__":
-    # Создание тестового звука если нужно
-    if not os.path.exists(config.SOUND_FILE):
-        print("Создание тестового звукового файла...")
-        create_test_sound_file()
-    
     player = SoundPlayer()
     print(f"Звуковая система доступна: {player.is_available}")
     print(f"Статус: {player.get_status()}")
