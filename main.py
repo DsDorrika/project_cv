@@ -74,7 +74,54 @@ class MainApplication:
 
         # Инициализация GUI (делаем только если компоненты поднялись)
         try:
+<<<<<<< HEAD
             self.gui = self._initialize_gui()
+=======
+            # Камера
+            self.logger.info("Инициализация камеры...")
+            components['camera'] = Camera(config.VIDEO_SOURCE)
+            
+            if not components['camera'].is_running:
+                self.logger.error("Не удалось инициализировать камеру")
+                return {}
+            
+            # Детектор объектов
+            self.logger.info("Инициализация детектора объектов...")
+            components['detector'] = ObjectDetector()
+            
+            if components['detector'].net is None:
+                self.logger.error("Не удалось загрузить модель детектора")
+                return {}
+            
+            # Детектор пересечения линии
+            self.logger.info("Инициализация детектора пересечения линии...")
+            components['line_detector'] = LineCrossingDetector(config.CROSSING_LINE_COORDS)
+            
+            # Проигрыватель звуков
+            self.logger.info("Инициализация звуковой системы...")
+            components['sound_player'] = get_sound_player()
+            
+            # Менеджер нарушений
+            self.logger.info("Инициализация менеджера нарушений...")
+            components['violation_manager'] = ViolationManager()
+            
+            self.logger.info("Все компоненты успешно инициализированы")
+            return components
+            
+        except Exception as e:
+            self.logger.error(f"Ошибка инициализации компонентов: {e}")
+            return {}
+
+    def _initialize_gui(self) -> ApplicationGUI:
+        """Инициализация графического интерфейса"""
+        try:
+            gui = ApplicationGUI(
+                root=self.root,
+                sound_player_callback=self._on_test_sound,
+                start_detection_callback=self.start_detection,
+                stop_detection_callback=self.stop_detection,
+            )
+>>>>>>> 6852fe3 (Облегчение проекта)
             self.logger.info("GUI инициализирован")
         except Exception as e:
             self.logger.error(f"Ошибка инициализации GUI: {e}")
