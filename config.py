@@ -37,7 +37,7 @@ TARGET_CLASS_ID = 15  # ID для 'person' в MobileNet-SSD
 # TARGET_CLASS_ID = 0  # ID для 'person' в YOLO
 
 # 4. Параметры звука
-SOUND_FILE = str(SOUNDS_DIR / "beep.wav")
+SOUND_FILE = str(SOUNDS_DIR / "beep.mp3")
 SOUND_ENABLED = True  # Включить/выключить звуковые оповещения
 SOUND_VOLUME = 0.7  # Громкость звука (0.0 - 1.0)
 
