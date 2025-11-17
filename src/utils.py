@@ -121,18 +121,28 @@ class FPSCounter:
         while len(self.times) > self.buffer_size:
             self.times.pop(0)
         
-        # Расчет FPS
+        # Расчет FPS на основе скользящего окна
+        fps = 0.0
         if len(self.times) > 1:
-            fps = len(self.times) / (self.times[-1] - self.times[0])
-        else:
-            fps = 0
-            
+            elapsed = self.times[-1] - self.times[0]
+            if elapsed > 0:
+                fps = (len(self.times) - 1) / elapsed
+        
         return fps
     
     def get_global_fps(self) -> float:
-        """Получение общего FPS с начала работы"""
-        elapsed = time.time() - self.start_time
-        return self.frame_count / elapsed if elapsed > 0 else 0
+        """Получение текущего (скользящего) FPS на основе буфера.
+        Метод ранее возвращал общий средний FPS с начала работы — это приводило к
+        растущим значениям при долгой работе. Теперь этот метод возвращает
+        скользящую оценку FPS (за последние buffer_size кадров).
+        """
+        if len(self.times) > 1:
+            elapsed = self.times[-1] - self.times[0]
+            if elapsed > 0:
+                return (len(self.times) - 1) / elapsed
+        # Фолбэк — использовать общую статистику
+        elapsed_total = time.time() - self.start_time
+        return self.frame_count / elapsed_total if elapsed_total > 0 else 0.0
 
 # Тестирование
 if __name__ == "__main__":

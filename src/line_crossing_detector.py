@@ -4,6 +4,7 @@ from typing import List, Dict, Any, Tuple, Optional
 import config
 from src.utils import calculate_distance
 import logging
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -13,12 +14,16 @@ class LineCrossingDetector:
         self.line_coords = line_coords or config.CROSSING_LINE_COORDS
         self.tracked_objects: Dict[int, Dict[str, Any]] = {}
         self.next_object_id = 0
-        self.max_tracking_distance = 70
-        self.max_frames_lost = 10  # Максимальное количество кадров без обнаружения
+        # use values from config when available
+        self.max_tracking_distance = getattr(config, 'TRACKING_MAX_DISTANCE', 70)
+        self.max_frames_lost = getattr(config, 'MAX_FRAMES_LOST', 10)  # Максимальное количество кадров без обнаружения
         
         # Статистика
         self.crossings_count = 0
         self.directions_count = {'POSITIVE->NEGATIVE': 0, 'NEGATIVE->POSITIVE': 0}
+        
+        # Интервал между фиксациями нарушений от одного объекта (в секундах)
+        self.min_violation_interval = getattr(config, 'MIN_VIOLATION_INTERVAL_SECONDS', 60)
         
         # Параметры линии
         self.A, self.B, self.C = self._calculate_line_params()
@@ -49,7 +54,8 @@ class LineCrossingDetector:
     def _get_side(self, point: Tuple[float, float]) -> str:
         """Определение стороны относительно линии"""
         value = self._get_side_value(point)
-        if abs(value) < 5:  # Порог для учета погрешности
+        tol = getattr(config, 'LINE_TOLERANCE_PX', 5)
+        if abs(value) <= tol:  # Порог для учета погрешности
             return 'ON_LINE'
         return 'POSITIVE' if value > 0 else 'NEGATIVE'
 
@@ -99,25 +105,39 @@ class LineCrossingDetector:
             track_data = self.tracked_objects[obj_id]
             prev_side = track_data['side']
             
+            # Определяем, считать ли переход пересечением
+            crossed = False
+            if new_side != prev_side:
+                # Если одна из сторон ON_LINE, учитываем флаг ENFORCE_LINE_VIOLATION
+                if prev_side == 'ON_LINE' or new_side == 'ON_LINE':
+                    crossed = bool(getattr(config, 'ENFORCE_LINE_VIOLATION', False))
+                else:
+                    crossed = True
+
             # Проверка пересечения линии
-            if (new_side != prev_side and 
-                prev_side != 'ON_LINE' and 
-                new_side != 'ON_LINE'):
-                
+            if crossed:
                 direction = f"{prev_side}->{new_side}"
-                violations.append({
-                    'id': obj_id,
-                    'box': detection['box'],
-                    'direction': direction,
-                    'timestamp': detection.get('timestamp'),
-                    'confidence': detection.get('confidence', 0)
-                })
+                # Учитываем интервал: если с последнего нарушения у этого объекта прошло меньше min_violation_interval — пропускаем
+                last_violation_ts = track_data.get('last_violation_ts')
+                now_ts = time.time()
+                if last_violation_ts is None or (now_ts - last_violation_ts) >= self.min_violation_interval:
+                    violation = {
+                        'id': obj_id,
+                        'box': detection['box'],
+                        'direction': direction,
+                        'timestamp': detection.get('timestamp') or now_ts,
+                        'confidence': detection.get('confidence', 0),
+                        'class_id': detection.get('class_id'),
+                        'class_name': detection.get('class_name', 'unknown')
+                    }
+                    violations.append(violation)
+
+                    # Обновление статистики
+                    self.crossings_count += 1
+                    self.directions_count[direction] = self.directions_count.get(direction, 0) + 1
+                    track_data['last_violation_ts'] = now_ts
+                    logger.info(f"Обнаружено пересечение: ID {obj_id}, направление {direction}")
                 
-                # Обновление статистики
-                self.crossings_count += 1
-                self.directions_count[direction] = self.directions_count.get(direction, 0) + 1
-                logger.info(f"Обнаружено пересечение: ID {obj_id}, направление {direction}")
-            
             # Обновление данных трекинга
             track_data.update({
                 'side': new_side,
@@ -137,7 +157,8 @@ class LineCrossingDetector:
                     'side': self._get_side(center),
                     'last_pos': center,
                     'detection': detection,
-                    'frames_since_seen': 0
+                    'frames_since_seen': 0,
+                    'last_violation_ts': None
                 }
         
         # Удаление потерянных объектов

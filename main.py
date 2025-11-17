@@ -3,6 +3,7 @@ import time
 import tkinter as tk
 import logging
 import sys
+import os
 from pathlib import Path
 from typing import Optional, Dict, Any
 
@@ -19,6 +20,7 @@ from src.sound_player import SoundPlayer, get_sound_player
 from src.violation_manager import ViolationManager
 from src.gui import ApplicationGUI
 from src.utils import FPSCounter, resize_frame, draw_text_with_background
+from src.yolo_detector import YOLODetector
 
 
 class MainApplication:
@@ -88,6 +90,79 @@ class MainApplication:
         
         return logger
 
+    def _ensure_yolo_dependency(self):
+        """Попытка установить ultralytics автоматически, если нужно."""
+        try:
+            import importlib
+            spec = importlib.util.find_spec('ultralytics')
+            if spec is None:
+                self.logger.info('Пакет ultralytics не найден. Попытка установить через pip...')
+                # Устанавливаем пакет
+                import subprocess
+                subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'ultralytics'])
+                self.logger.info('ultralytics установлен.')
+        except Exception as e:
+            self.logger.error(f'Не удалось установить ultralytics автоматически: {e}')
+
+    def _download_yolo_model(self, dest_path: str) -> bool:
+        """Скачать yolov8n.pt в папку models/ (streaming download).
+        Возвращает True если успешно.
+        """
+        url = 'https://github.com/ultralytics/assets/releases/download/v0.0.0/yolov8n.pt'
+        try:
+            import requests
+        except Exception:
+            try:
+                import subprocess
+                subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'requests'])
+                import requests
+            except Exception as e:
+                self.logger.error(f"Не удалось установить requests для загрузки модели: {e}")
+                return False
+
+        try:
+            self.logger.info(f"Скачивание модели YOLOv8n из {url} -> {dest_path}")
+            with requests.get(url, stream=True, timeout=60) as r:
+                r.raise_for_status()
+                os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+                with open(dest_path, 'wb') as f:
+                    for chunk in r.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+            self.logger.info('Модель скачана успешно')
+            return True
+        except Exception as e:
+            self.logger.error(f'Ошибка скачивания модели YOLO: {e}')
+            return False
+
+    def _ensure_yolo_model(self):
+        """Гарантирует, что файл модели YOLO присутствует в папке models/."""
+        try:
+            model_path = getattr(config, 'YOLO_MODEL', None)
+            if not model_path:
+                model_path = str(Path(ROOT_DIR) / 'models' / 'yolov8n.pt')
+            # Если уже существует — ok
+            if os.path.exists(model_path):
+                self.logger.info(f'YOLO модель найдена: {model_path}')
+                return True
+
+            # Попытка скачать в папку models
+            local_path = os.path.join(str(Path(__file__).parent.parent), 'models', 'yolov8n.pt')
+            success = self._download_yolo_model(local_path)
+            if success:
+                # Обновим config.YOLO_MODEL чтобы указывать на локальный файл
+                try:
+                    config.YOLO_MODEL = local_path
+                except Exception:
+                    pass
+                return True
+            else:
+                self.logger.warning('Не удалось скачать YOLO модель автоматически')
+                return False
+        except Exception as e:
+            self.logger.error(f'Ошибка при проверке/скачивании модели YOLO: {e}')
+            return False
+
     def _initialize_components(self) -> Dict[str, Any]:
         """Инициализация всех компонентов системы"""
         components = {}
@@ -103,12 +178,36 @@ class MainApplication:
             
             # Детектор объектов
             self.logger.info("Инициализация детектора объектов...")
-            components['detector'] = ObjectDetector()
-            
-            if components['detector'].net is None:
-                self.logger.error("Не удалось загрузить модель детектора")
+            try:
+                if getattr(config, 'USE_YOLO', False):
+                    # Если ultralytics не установлен — попытаться установить
+                    try:
+                        from ultralytics import YOLO  # noqa: F401
+                    except Exception:
+                        self._ensure_yolo_dependency()
+
+                    # Убедиться, что модель скачана
+                    yolo_ready = self._ensure_yolo_model()
+                    if not yolo_ready:
+                        self.logger.warning('YOLO не готов — делаем fallback на MobileNet-SSD')
+                        components['detector'] = ObjectDetector()
+                    else:
+                        try:
+                            components['detector'] = YOLODetector(model_path=getattr(config, 'YOLO_MODEL', None))
+                        except Exception as e:
+                            self.logger.error(f'Ошибка инициализации YOLODetector: {e}. Выполняем fallback на MobileNet-SSD')
+                            components['detector'] = ObjectDetector()
+                else:
+                    components['detector'] = ObjectDetector()
+
+                # Для ObjectDetector проверяем net, для YOLODetector — исключения при инициализации
+                if hasattr(components['detector'], 'net') and components['detector'].net is None:
+                    self.logger.error("Не удалось загрузить модель детектора")
+                    return {}
+            except Exception as e:
+                self.logger.error(f"Не удалось загрузить модель детектора: {e}")
                 return {}
-            
+
             # Детектор пересечения линии
             self.logger.info("Инициализация детектора пересечения линии...")
             components['line_detector'] = LineCrossingDetector(config.CROSSING_LINE_COORDS)
@@ -253,18 +352,26 @@ class MainApplication:
             # Обновление счетчика FPS обработки
             self.processing_fps_counter.update()
             
-            # Детекция пересечения линии
+            # Выбираем кадр, на котором будет отрисована визуализация линии и трекинга.
+            # Если мы не изменяли размер для обработки, рисуем на оригинальном кадре,
+            # иначе рисуем на обработанном (чтобы координаты совпадали с детекциями).
+            draw_frame = frame if not config.RESIZE_FRAME_FOR_PROCESSING else processing_frame
+            
+            # Детекция пересечения линии (визуализация будет нанесена на draw_frame)
             violations = self.components['line_detector'].process_detections(
-                processing_frame, detections
+                draw_frame, detections
             )
             
             # Обработка нарушений
             if violations:
                 self._handle_violations(frame, violations)
             
-            # Отрисовка детекций на оригинальном кадре
+            # Отрисовка детекций на оригинальном кадре (если используются совпадающие координаты)
             if config.SHOW_DETECTIONS:
-                self.components['detector'].draw_detections(frame, detections)
+                # Если мы рисовали на обработанном кадре, попытка нарисовать на оригинальном
+                # может привести к несоответствию размеров. Рисуем на том же кадре, что и линия.
+                target_draw_frame = frame if not config.RESIZE_FRAME_FOR_PROCESSING else processing_frame
+                self.components['detector'].draw_detections(target_draw_frame, detections)
             
             # Добавление информации на кадр
             if config.DEBUG_MODE or config.SHOW_FPS:

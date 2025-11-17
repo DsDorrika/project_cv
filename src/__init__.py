@@ -60,12 +60,6 @@ def setup_logging(level=logging.INFO):
     )
     logger.info("Логирование инициализировано для пакета src")
 
-# Автоматическая настройка при импорте пакета
-try:
-    setup_logging()
-except Exception as e:
-    print(f"Не удалось настроить логирование: {e}")
-
 # Информация о пакете
 def get_package_info():
     """Возвращает информацию о пакете"""
@@ -78,5 +72,3 @@ def get_package_info():
             'gui', 'sound_player', 'violation_manager', 'utils'
         ]
     }
-
-print(f"Пакет src инициализирован (версия {__version__})")

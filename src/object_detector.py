@@ -18,20 +18,12 @@ class ObjectDetector:
         self.processing_times = []
         self.detection_count = 0
         
-        # COCO names для отладки
+        # MobileNet-SSD (Caffe) labels (PASCAL VOC style)
+        # This model outputs class IDs matching this list where index 15 == 'person'
         self.class_names = [
-            'person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train', 'truck',
-            'boat', 'traffic light', 'fire hydrant', 'stop sign', 'parking meter', 'bench',
-            'bird', 'cat', 'dog', 'horse', 'sheep', 'cow', 'elephant', 'bear', 'zebra',
-            'giraffe', 'backpack', 'umbrella', 'handbag', 'tie', 'suitcase', 'frisbee',
-            'skis', 'snowboard', 'sports ball', 'kite', 'baseball bat', 'baseball glove',
-            'skateboard', 'surfboard', 'tennis racket', 'bottle', 'wine glass', 'cup',
-            'fork', 'knife', 'spoon', 'bowl', 'banana', 'apple', 'sandwich', 'orange',
-            'broccoli', 'carrot', 'hot dog', 'pizza', 'donut', 'cake', 'chair', 'couch',
-            'potted plant', 'bed', 'dining table', 'toilet', 'tv', 'laptop', 'mouse',
-            'remote', 'keyboard', 'cell phone', 'microwave', 'oven', 'toaster', 'sink',
-            'refrigerator', 'book', 'clock', 'vase', 'scissors', 'teddy bear', 'hair drier',
-            'toothbrush'
+            'background', 'aeroplane', 'bicycle', 'bird', 'boat', 'bottle',
+            'bus', 'car', 'cat', 'chair', 'cow', 'diningtable', 'dog', 'horse',
+            'motorbike', 'person', 'pottedplant', 'sheep', 'sofa', 'train', 'tvmonitor'
         ]
         
         self.net = self._initialize_network()
@@ -68,54 +60,116 @@ class ObjectDetector:
             # Подготовка входного изображения
             blob = cv2.dnn.blobFromImage(
                 frame, 0.007843, (300, 300), 127.5, 
-                swapRB=True, crop=False
+                swapRB=False, crop=False
             )
-            
+
             self.net.setInput(blob)
             detections = self.net.forward()
 
-            # Обработка результатов
+            # Собираем все кандидаты (для всех классов) для корректного отображения множества боксов
+            candidate_boxes = []  # в формате [x, y, w, h]
+            candidate_confs = []
+            candidate_raw = []  # сохраняем исходные значения для построения результата
+
             for i in range(detections.shape[2]):
-                confidence = detections[0, 0, i, 2]
-                
-                if confidence > self.confidence_threshold:
-                    class_id = int(detections[0, 0, i, 1])
-                    
-                    # Фильтрация по целевому классу
-                    if class_id == self.target_class_id:
-                        box = detections[0, 0, i, 3:7] * np.array([W, H, W, H])
-                        (startX, startY, endX, endY) = box.astype("int")
-                        
-                        # Корректировка координат
-                        startX = max(0, startX)
-                        startY = max(0, startY)
-                        endX = min(W, endX)
-                        endY = min(H, endY)
-                        
-                        # Проверка валидности bounding box
-                        if endX > startX and endY > startY:
-                            results.append({
-                                'box': [startX, startY, endX, endY],
-                                'confidence': float(confidence),
-                                'class_id': class_id,
-                                'class_name': self.class_names[class_id],
-                                'bottom_center': (int((startX + endX) / 2), endY),
-                                'area': (endX - startX) * (endY - startY),
-                                'timestamp': time.time()
-                            })
-            
+                confidence = float(detections[0, 0, i, 2])
+                if confidence <= self.confidence_threshold:
+                    continue
+
+                class_id = int(detections[0, 0, i, 1])
+
+                box = detections[0, 0, i, 3:7] * np.array([W, H, W, H])
+                (startX, startY, endX, endY) = box.astype("int")
+
+                # Приводим к валидным координатам
+                startX = max(0, startX)
+                startY = max(0, startY)
+                endX = min(W - 1, endX)
+                endY = min(H - 1, endY)
+
+                if endX <= startX or endY <= startY:
+                    continue
+
+                width = endX - startX
+                height = endY - startY
+                area = width * height
+
+                # Отсеиваем явно неверные размеры
+                if area <= 0 or width < 10 or height < 10:
+                    logger.debug(f"Игнорирование слишком маленького бокса: w={width}, h={height}")
+                    continue
+                if area > 0.98 * (W * H):
+                    logger.debug(f"Игнорирование слишком большого бокса: area={area}, W*H={W*H}")
+                    continue
+
+                # cv2.dnn.NMSBoxes ожидает [x,y,w,h]
+                candidate_boxes.append([int(startX), int(startY), int(width), int(height)])
+                candidate_confs.append(float(confidence))
+
+                class_name = self.class_names[class_id] if class_id < len(self.class_names) else str(class_id)
+
+                candidate_raw.append({
+                    'box_xyxy': [int(startX), int(startY), int(endX), int(endY)],
+                    'confidence': float(confidence),
+                    'class_id': class_id,
+                    'class_name': class_name
+                })
+
+            # Если нет кандидатов — вернуть пусто
+            if not candidate_boxes:
+                processing_time = time.time() - start_time
+                self.processing_times.append(processing_time)
+                if len(self.processing_times) > 100:
+                    self.processing_times.pop(0)
+                return []
+
+            # Выполняем NMS для удаления дубликатов
+            nms_threshold = getattr(config, 'DETECTOR_NMS_THRESHOLD', 0.4)
+            try:
+                indices = cv2.dnn.NMSBoxes(candidate_boxes, candidate_confs, self.confidence_threshold, nms_threshold)
+                # Приводим индексы к списку целых индексов
+                if hasattr(indices, 'flatten'):
+                    flat_indices = indices.flatten().tolist()
+                elif isinstance(indices, (list, tuple)):
+                    flat_indices = [i[0] if isinstance(i, (list, tuple, np.ndarray)) else int(i) for i in indices]
+                else:
+                    flat_indices = list(indices)
+
+            except Exception:
+                flat_indices = list(range(len(candidate_boxes)))
+
+            # Формируем финальный список детекций из оставшихся индексов
+            for idx in flat_indices:
+                raw = candidate_raw[int(idx)]
+                startX, startY, endX, endY = raw['box_xyxy']
+                width = endX - startX
+                height = endY - startY
+                area = float(width * height)
+
+                bottom_cy = min(endY, H - 1)
+
+                results.append({
+                    'box': [startX, startY, endX, endY],
+                    'confidence': raw['confidence'],
+                    'class_id': raw['class_id'],
+                    'class_name': raw.get('class_name', str(raw['class_id'])),
+                    'bottom_center': (int((startX + endX) / 2), int(bottom_cy)),
+                    'area': area,
+                    'timestamp': time.time()
+                })
+
             # Обновление статистики
             processing_time = time.time() - start_time
             self.processing_times.append(processing_time)
             self.detection_count += len(results)
-            
+
             # Сохранение только последних 100 измерений
             if len(self.processing_times) > 100:
                 self.processing_times.pop(0)
-                
+
         except Exception as e:
             logger.error(f"Ошибка при детекции объектов: {e}")
-            
+
         return results
 
     def get_average_processing_time(self) -> float:

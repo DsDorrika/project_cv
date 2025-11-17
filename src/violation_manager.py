@@ -102,12 +102,14 @@ class ViolationManager:
             violation_id = violation_data.get('id', 'N/A')
             direction = violation_data.get('direction', 'N/A')
             confidence = violation_data.get('confidence', 0)
+            class_name = violation_data.get('class_name', 'unknown')
+            class_id = violation_data.get('class_id')
             
             # Текстовая информация
             texts = [
                 f"VIOLATION: {timestamp}",
                 f"ID: {violation_id} Direction: {direction}",
-                f"Confidence: {confidence:.2f}"
+                f"Class: {class_name} ({class_id}) Confidence: {confidence:.2f}"
             ]
             
             # Рисование текста с фоном
@@ -122,7 +124,7 @@ class ViolationManager:
                 cv2.rectangle(frame, (startX, startY), (endX, endY), (0, 0, 255), 3)
                 
                 # Подпись бокса
-                box_text = f"Violation {violation_id}"
+                box_text = f"Violation {violation_id}: {class_name}"
                 cv2.putText(frame, box_text, (startX, startY - 10), 
                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
                 
@@ -138,6 +140,8 @@ class ViolationManager:
             'direction': violation_data.get('direction'),
             'confidence': violation_data.get('confidence'),
             'bounding_box': violation_data.get('box'),
+            'class_id': violation_data.get('class_id'),
+            'class_name': violation_data.get('class_name', None),
             'image_path': image_path if image_success else None,
             'image_saved': image_success,
             'system_info': {

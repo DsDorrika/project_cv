@@ -48,9 +48,13 @@ SAVE_VIOLATION_METADATA = True  # Сохранять метаданные нар
 MAX_VIOLATION_AGE_DAYS = 30  # Автоочистка файлов старше N дней
 
 # 6. Параметры детектора пересечения линии
-TRACKING_MAX_DISTANCE = 70  # Максимальное расстояние для трекинга объектов
+TRACKING_MAX_DISTANCE = 120  # Максимальное расстояние для трекинга объектов (увеличено для более устойчивого трекинга)
 MAX_FRAMES_LOST = 10  # Максимальное количество кадров без обнаружения
 MIN_CONFIDENCE_FOR_TRACKING = 0.3  # Минимальная уверенность для трекинга
+
+# Параметры линии
+LINE_TOLERANCE_PX = 8  # Порог для определения, что точка находится на линии (в пикселях)
+ENFORCE_LINE_VIOLATION = True  # Если True, любое пересечение линии считается нарушением (без направления)
 
 # 7. Параметры GUI
 GUI_UPDATE_INTERVAL = 100  # Интервал обновления GUI в мс
@@ -73,6 +77,10 @@ DEBUG_MODE = False  # Режим отладки (дополнительная и
 SAVE_DEBUG_IMAGES = False  # Сохранять отладочные изображения
 PRINT_DETECTION_STATS = False  # Выводить статистику детекции
 
+# 11. Параметры YOLO (альтернативная модель)
+USE_YOLO = False  # Включить использование YOLO (требует ultralytics/torch)
+YOLO_MODEL = str(MODELS_DIR / "yolov8n.pt")  # Путь к модели YOLOv8 (можно использовать предобученную yolov8n)
+
 
 def validate_config():
     """Проверка корректности конфигурации"""
@@ -85,6 +93,11 @@ def validate_config():
     
     if not os.path.exists(DETECTOR_CONFIG_PATH):
         errors.append(f"Файл конфигурации модели не найден: {DETECTOR_CONFIG_PATH}")
+
+    # Если включен YOLO, проверяем файл .pt
+    if USE_YOLO:
+        if not os.path.exists(YOLO_MODEL):
+            errors.append(f"YOLO модель не найдена: {YOLO_MODEL}")
     
     # Проверка звукового файла
     if SOUND_ENABLED and not os.path.exists(SOUND_FILE):
