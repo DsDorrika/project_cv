@@ -45,6 +45,8 @@ class MainApplication:
         self.total_violations = 0
         self.frame_count = 0
         self.processing_stats: Dict[str, Any] = {}
+        # Временная метка последнего автоматического нарушения (для режима 1 нарушение/сек)
+        self.last_violation_ts = 0.0
         
         # Инициализация компонентов
         self.components = self._initialize_components()
@@ -179,8 +181,9 @@ class MainApplication:
             # Детектор объектов
             self.logger.info("Инициализация детектора объектов...")
             try:
+                # Используем только YOLO, отключаем MobileNet-SSD
                 if getattr(config, 'USE_YOLO', False):
-                    # Если ultralytics не установлен — попытаться установить
+                    # Убедиться, что ultralytics доступен
                     try:
                         from ultralytics import YOLO  # noqa: F401
                     except Exception:
@@ -189,20 +192,22 @@ class MainApplication:
                     # Убедиться, что модель скачана
                     yolo_ready = self._ensure_yolo_model()
                     if not yolo_ready:
-                        self.logger.warning('YOLO не готов — делаем fallback на MobileNet-SSD')
-                        components['detector'] = ObjectDetector()
-                    else:
-                        try:
-                            components['detector'] = YOLODetector(model_path=getattr(config, 'YOLO_MODEL', None))
-                        except Exception as e:
-                            self.logger.error(f'Ошибка инициализации YOLODetector: {e}. Выполняем fallback на MobileNet-SSD')
-                            components['detector'] = ObjectDetector()
-                else:
-                    components['detector'] = ObjectDetector()
+                        self.logger.error('YOLO модель отсутствует и не может быть загружена. Прекращаем инициализацию.')
+                        return {}
 
-                # Для ObjectDetector проверяем net, для YOLODetector — исключения при инициализации
-                if hasattr(components['detector'], 'net') and components['detector'].net is None:
-                    self.logger.error("Не удалось загрузить модель детектора")
+                    # Инициализация YOLODetector
+                    try:
+                        components['detector'] = YOLODetector(model_path=getattr(config, 'YOLO_MODEL', None))
+                    except Exception as e:
+                        self.logger.error(f'Ошибка инициализации YOLODetector: {e}')
+                        return {}
+                else:
+                    self.logger.error('Конфигурация требует использование только YOLO. Установите USE_YOLO=True в config.py')
+                    return {}
+
+                # Для YOLODetector проверяем наличие объекта
+                if components.get('detector') is None:
+                    self.logger.error('Не удалось инициализировать детектор')
                     return {}
             except Exception as e:
                 self.logger.error(f"Не удалось загрузить модель детектора: {e}")
@@ -345,38 +350,93 @@ class MainApplication:
                 )
             else:
                 processing_frame = frame.copy()
-            
+
             # Детекция объектов
             detections = self.components['detector'].detect(processing_frame)
-            
-            # Обновление счетчика FPS обработки
-            self.processing_fps_counter.update()
-            
+
+            if config.DEBUG_MODE:
+                try:
+                    self.logger.debug(f"Detections count: {len(detections)}")
+                    for i, d in enumerate(detections):
+                        self.logger.debug(f"Det[{i}]: cls={d.get('class_name')}/{d.get('class_id')} conf={d.get('confidence'):.3f} box={d.get('box')}")
+                except Exception:
+                    pass
+
             # Выбираем кадр, на котором будет отрисована визуализация линии и трекинга.
-            # Если мы не изменяли размер для обработки, рисуем на оригинальном кадре,
-            # иначе рисуем на обработанном (чтобы координаты совпадали с детекциями).
             draw_frame = frame if not config.RESIZE_FRAME_FOR_PROCESSING else processing_frame
-            
-            # Детекция пересечения линии (визуализация будет нанесена на draw_frame)
-            violations = self.components['line_detector'].process_detections(
-                draw_frame, detections
-            )
-            
+
+            # Детекция пересечения линии / области (визуализация будет нанесена на draw_frame)
+            violations = self.components['line_detector'].process_detections(draw_frame, detections)
+
+            if config.DEBUG_MODE:
+                self.logger.debug(f"Line detector returned violations: {len(violations)}")
+
+            # Временное правило: одно автоматическое нарушение в секунду, если обнаружен человек в зоне нарушения
+            try:
+                now_auto = time.time()
+                person_in_zone = False
+                person_box = None
+                person_det = None
+                zone = getattr(config, 'VIOLATION_REGION_COORDS', None)
+                for det in detections:
+                    if det.get('class_id') != config.TARGET_CLASS_ID:
+                        continue
+                    bx1, by1, bx2, by2 = det['box']
+                    bottom = det['bottom_center']
+                    if zone:
+                        zx1, zy1, zx2, zy2 = zone
+                        if zx1 <= bottom[0] <= zx2 and zy1 <= bottom[1] <= zy2:
+                            person_in_zone = True
+                            person_box = det['box']
+                            person_det = det
+                            break
+                    else:
+                        # fallback: проверка близости к линии по Y с допуском
+                        lx1, ly1, lx2, ly2 = config.CROSSING_LINE_COORDS
+                        line_y = (ly1 + ly2) / 2
+                        tol = getattr(config, 'REGION_ENTRY_TOLERANCE_PX', 30)
+                        if abs(bottom[1] - line_y) <= tol:
+                            person_in_zone = True
+                            person_box = det['box']
+                            person_det = det
+                            break
+
+                if config.DEBUG_MODE:
+                    self.logger.debug(f"person_in_zone={person_in_zone}, last_violation_ts={self.last_violation_ts}")
+
+                if person_in_zone and (now_auto - self.last_violation_ts) >= 1.0:
+                    # Создаём автоматическое нарушение — звук и сохранение произойдет через _handle_violations
+                    auto_violation = {
+                        'id': f"auto_{int(now_auto*1000)}",
+                        'box': person_box,
+                        'direction': 'AUTO_REGION',
+                        'timestamp': now_auto,
+                        'confidence': person_det.get('confidence', 0.0) if person_det else 0.0,
+                        'class_id': person_det.get('class_id') if person_det else None,
+                        'class_name': person_det.get('class_name', 'person') if person_det else 'person'
+                    }
+                    violations.append(auto_violation)
+                    self.last_violation_ts = now_auto
+                    if config.DEBUG_MODE:
+                        self.logger.debug(f"Auto violation generated: {auto_violation}")
+            except Exception as e:
+                self.logger.error(f"Ошибка в временной логике автоматических нарушений: {e}")
+
             # Обработка нарушений
             if violations:
+                if config.DEBUG_MODE:
+                    self.logger.debug(f"Calling _handle_violations with {len(violations)} violations")
                 self._handle_violations(frame, violations)
-            
+
             # Отрисовка детекций на оригинальном кадре (если используются совпадающие координаты)
             if config.SHOW_DETECTIONS:
-                # Если мы рисовали на обработанном кадре, попытка нарисовать на оригинальном
-                # может привести к несоответствию размеров. Рисуем на том же кадре, что и линия.
                 target_draw_frame = frame if not config.RESIZE_FRAME_FOR_PROCESSING else processing_frame
                 self.components['detector'].draw_detections(target_draw_frame, detections)
-            
+
             # Добавление информации на кадр
             if config.DEBUG_MODE or config.SHOW_FPS:
                 self._annotate_frame(frame)
-            
+
             return frame
             
         except Exception as e:

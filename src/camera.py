@@ -21,29 +21,71 @@ class Camera:
         self._initialize_camera()
 
     def _initialize_camera(self) -> bool:
-        """Инициализация камеры с обработкой ошибок"""
+        """Инициализация камеры с обработкой ошибок. Пытаем несколько бэкендов на Windows (DSHOW, MSMF)."""
         try:
-            self.cap = cv2.VideoCapture(self.source)
-            
-            if not self.cap.isOpened():
-                logger.error(f"Не удалось открыть источник видео: {self.source}")
-                return False
-            
-            # Установка параметров для лучшей производительности
-            if isinstance(self.source, int):  # Веб-камера
-                self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
-                self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-                self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-                self.cap.set(cv2.CAP_PROP_FPS, 30)
-            
-            self.width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            self.height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            self.fps = self.cap.get(cv2.CAP_PROP_FPS)
+            # Если источник - строка (файл) — стандартный захват
+            if not isinstance(self.source, int):
+                self.cap = cv2.VideoCapture(self.source)
+                opened = self.cap.isOpened()
+                if not opened:
+                    logger.error(f"Не удалось открыть видеофайл/источник: {self.source}")
+                    return False
+                logger.info(f"Видеофайл открыт: {self.source}")
+            else:
+                # Для веб-камеры пробуем несколько API на Windows, чтобы избежать ошибок MSMF
+                attempted = []
+                backends = []
+                try:
+                    # CAP_DSHOW обычно надёжен для многих USB камер на Windows
+                    backends.append(cv2.CAP_DSHOW)
+                except Exception:
+                    pass
+                try:
+                    backends.append(cv2.CAP_MSMF)
+                except Exception:
+                    pass
+                backends.append(cv2.CAP_ANY)
+
+                opened = False
+                for api in backends:
+                    try:
+                        self.cap = cv2.VideoCapture(self.source, api)
+                        time.sleep(0.05)
+                        if self.cap.isOpened():
+                            logger.info(f"Камера инициализирована через backend API={api}")
+                            opened = True
+                            break
+                        else:
+                            attempted.append(api)
+                            try:
+                                self.cap.release()
+                            except Exception:
+                                pass
+                    except Exception as e:
+                        logger.warning(f"Попытка инициализации через API={api} завершилась ошибкой: {e}")
+
+                if not opened:
+                    logger.error(f"Не удалось открыть камеру {self.source}. Попытанные API: {attempted}")
+                    return False
+
+                # Установка параметров для лучшей производительности
+                try:
+                    self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+                    self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+                    self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+                    self.cap.set(cv2.CAP_PROP_FPS, 30)
+                except Exception:
+                    # Игнорируем если backend не поддерживает эти свойства
+                    pass
+
+            self.width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+            self.height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+            self.fps = self.cap.get(cv2.CAP_PROP_FPS) or 0
             self.is_running = True
-            
+
             logger.info(f"Камера инициализирована: {self.width}x{self.height}, FPS: {self.fps:.2f}")
             return True
-            
+
         except Exception as e:
             logger.error(f"Ошибка инициализации камеры: {e}")
             return False
@@ -59,11 +101,17 @@ class Camera:
             
             if not ret:
                 logger.warning("Не удалось прочитать кадр")
-                # Попытка переинициализации для веб-камер
+                # Попытка переинициализации для веб-камер — несколько попыток для устойчивости
                 if isinstance(self.source, int):
+                    try_count = 0
                     self.release()
-                    time.sleep(0.1)
-                    self._initialize_camera()
+                    while try_count < 3 and not self._initialize_camera():
+                        try_count += 1
+                        logger.info(f"Повторная попытка инициализации камеры #{try_count}")
+                        time.sleep(0.2)
+                    if try_count >= 3:
+                        logger.error("Не удалось восстановить камеру после нескольких попыток")
+                        return False, None
                 return False, None
             
             return True, frame
