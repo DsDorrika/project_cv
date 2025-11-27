@@ -21,6 +21,7 @@ from src.violation_manager import ViolationManager
 from src.gui import ApplicationGUI
 from src.utils import FPSCounter, resize_frame, draw_text_with_background
 from src.yolo_detector import YOLODetector
+from src.settings_manager import load_user_settings, save_user_settings
 
 
 class MainApplication:
@@ -241,6 +242,15 @@ class MainApplication:
                 start_detection_callback=self.start_detection,
                 stop_detection_callback=self.stop_detection,
             )
+            # Подключаем колбэки для загрузки и применения настроек
+            gui.load_settings_callback = self._load_settings
+            gui.apply_settings_callback = self._apply_settings
+            gui.get_camera_info_callback = (lambda: self.components.get('camera').get_info() if self.components.get('camera') else {})
+            # передаём начальные значения для окна настроек
+            user_settings = load_user_settings()
+            gui.initial_region_mode = bool(user_settings.get('mode') == 'region' or getattr(config, 'VIOLATION_REGION_COORDS', None))
+            # Callback for interactive selection on camera
+            gui.camera_select_callback = lambda mode: self._camera_select_interactive(mode)
             self.logger.info("GUI инициализирован")
             return gui
         except Exception as e:
@@ -554,22 +564,157 @@ class MainApplication:
         self.components['line_detector'].reset_stats()
         
         self.logger.info("Статистика сброшена")
-
-    def _save_current_frame(self, frame):
-        """Сохранение текущего кадра"""
+    
+    def _load_settings(self):
+        """Return current settings (for GUI to populate fields)"""
         try:
-            from src.utils import get_timestamp_filename
-            filename = f"debug_{get_timestamp_filename()}.jpg"
-            filepath = Path(config.VIOLATIONS_DIR) / filename
-            
-            success = cv2.imwrite(str(filepath), frame)
-            if success:
-                self.logger.info(f"Кадр сохранен: {filepath}")
-            else:
-                self.logger.error(f"Не удалось сохранить кадр: {filepath}")
-                
+            # merge config and user settings
+            user = load_user_settings()
+            settings = {}
+            settings['mode'] = user.get('mode') or ('region' if getattr(config, 'VIOLATION_REGION_COORDS', None) else 'line')
+            settings['coords'] = user.get('coords') or (getattr(config, 'VIOLATION_REGION_COORDS', None) or getattr(config, 'CROSSING_LINE_COORDS', None))
+            settings['tolerance'] = user.get('tolerance', getattr(config, 'REGION_ENTRY_TOLERANCE_PX', None))
+            settings['region_min_stay'] = user.get('region_min_stay', getattr(config, 'REGION_MIN_STAY_SECONDS', None))
+            return settings
         except Exception as e:
-            self.logger.error(f"Ошибка сохранения кадра: {e}")
+            self.logger.error(f"Error loading settings for GUI: {e}")
+            return {}
+
+    def _apply_settings(self, settings: dict):
+        """Apply settings live and persist them to disk.
+
+        settings: {'mode': 'line'|'region', 'coords': (x1,y1,x2,y2), 'tolerance': int, 'region_min_stay': float}
+        """
+        try:
+            # Persist
+            existing = load_user_settings()
+            existing.update(settings)
+            save_user_settings(existing)
+
+            # Apply to config and detector
+            mode = settings.get('mode')
+            coords = settings.get('coords')
+            tol = settings.get('tolerance')
+            minstay = settings.get('region_min_stay')
+
+            if mode == 'region':
+                config.VIOLATION_REGION_COORDS = tuple(coords)
+                config.CROSSING_LINE_COORDS = getattr(config, 'CROSSING_LINE_COORDS', config.CROSSING_LINE_COORDS)
+            else:
+                config.VIOLATION_REGION_COORDS = None
+                config.CROSSING_LINE_COORDS = tuple(coords)
+
+            if tol is not None:
+                config.REGION_ENTRY_TOLERANCE_PX = int(tol)
+                config.LINE_TOLERANCE_PX = int(tol)
+            if minstay is not None:
+                config.REGION_MIN_STAY_SECONDS = float(minstay)
+
+            # Update detector instance
+            ld = self.components.get('line_detector')
+            if ld:
+                ld.region_coords = getattr(config, 'VIOLATION_REGION_COORDS', None)
+                ld.region_mode = bool(ld.region_coords)
+                ld.line_coords = getattr(config, 'CROSSING_LINE_COORDS', None)
+                ld.A, ld.B, ld.C = ld._calculate_line_params()
+                ld.region_tolerance = getattr(config, 'REGION_ENTRY_TOLERANCE_PX', ld.region_tolerance)
+                ld.region_min_stay = getattr(config, 'REGION_MIN_STAY_SECONDS', ld.region_min_stay)
+
+            # Обновление GUI статуса
+            if hasattr(self, 'gui'):
+                self.gui.update_status("Настройки применены")
+                # Also update initial_region_mode for next opening
+                self.gui.initial_region_mode = ld.region_mode if ld else False
+
+            self.logger.info(f"Настройки применены: {settings}")
+        except Exception as e:
+            self.logger.error(f"Ошибка применения настроек: {e}")
+
+    def _camera_select_interactive(self, mode: Optional[str]) -> Optional[tuple]:
+        """Interactive selection on live camera preview.
+
+        mode: 'line' or 'region' (if None treated as 'region')
+        Returns tuple(coords) or None if cancelled.
+        """
+        try:
+            cam = self.components.get('camera')
+            if not cam or not cam.is_running:
+                self.logger.error("Камера недоступна для интерактивного выбора")
+                return None
+
+            win_name = 'Select Region - press s to save, c to cancel'
+            cv2.namedWindow(win_name, cv2.WINDOW_NORMAL)
+
+            state = {'start': None, 'end': None, 'dragging': False, 'final': False}
+
+            def _on_mouse(event, x, y, flags, param):
+                if event == cv2.EVENT_LBUTTONDOWN:
+                    state['start'] = (x, y)
+                    state['end'] = (x, y)
+                    state['dragging'] = True
+                elif event == cv2.EVENT_MOUSEMOVE and state['dragging']:
+                    state['end'] = (x, y)
+                elif event == cv2.EVENT_LBUTTONUP and state['dragging']:
+                    state['end'] = (x, y)
+                    state['dragging'] = False
+                    state['final'] = True
+
+            cv2.setMouseCallback(win_name, _on_mouse)
+
+            selected = None
+            mode = (mode or 'region')
+
+            while True:
+                ret, frame = cam.read()
+                if not ret:
+                    self.logger.error('Не удалось получить кадр для интерактивного выбора')
+                    break
+
+                vis = frame.copy()
+                # draw current selection
+                if state['start'] and state['end']:
+                    x1, y1 = state['start']
+                    x2, y2 = state['end']
+                    if mode == 'line':
+                        cv2.line(vis, (x1, y1), (x2, y2), (0, 0, 255), 2)
+                        cv2.circle(vis, (x1, y1), 5, (0, 255, 0), -1)
+                        cv2.circle(vis, (x2, y2), 5, (0, 255, 0), -1)
+                    else:
+                        # draw rectangle
+                        rx1, rx2 = sorted((x1, x2))
+                        ry1, ry2 = sorted((y1, y2))
+                        cv2.rectangle(vis, (rx1, ry1), (rx2, ry2), (0, 0, 255), 2)
+
+                # instructions
+                cv2.putText(vis, "Left-drag to select. Press 's' to save, 'c' to cancel.", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2)
+
+                cv2.imshow(win_name, vis)
+                key = cv2.waitKey(20) & 0xFF
+                if key == ord('c') or key == 27:
+                    selected = None
+                    break
+                if key == ord('s') or state['final']:
+                    if state['start'] and state['end']:
+                        x1, y1 = state['start']
+                        x2, y2 = state['end']
+                        if mode == 'line':
+                            selected = (int(x1), int(y1), int(x2), int(y2))
+                        else:
+                            rx1, rx2 = sorted((int(x1), int(x2)))
+                            ry1, ry2 = sorted((int(y1), int(y2)))
+                            selected = (rx1, ry1, rx2, ry2)
+                        break
+
+            cv2.destroyWindow(win_name)
+            return selected
+
+        except Exception as e:
+            self.logger.error(f"Ошибка интерактивного выбора: {e}")
+            try:
+                cv2.destroyAllWindows()
+            except Exception:
+                pass
+            return None
 
     def cleanup(self):
         """Очистка ресурсов при завершении работы"""
@@ -577,7 +722,7 @@ class MainApplication:
         
         self.is_running = False
         self.video_processing = False
-        
+
         try:
             # Освобождение ресурсов камеры
             if 'camera' in self.components:

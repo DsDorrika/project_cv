@@ -1,0 +1,11 @@
+{
+  "mode": "region",
+  "coords": [
+    13,
+    249,
+    1911,
+    320
+  ],
+  "tolerance": 10,
+  "region_min_stay": 0.5
+}
